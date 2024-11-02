@@ -9,6 +9,7 @@ export interface OptionsInterface {
   mediaType?: MediaTypes;
   mimeType?: string;
   multipleMedia?: boolean;
+  maxItems?: number;
 }
 
 export interface PhotoPickerInterface {

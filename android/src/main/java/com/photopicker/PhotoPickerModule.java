@@ -21,9 +21,19 @@ import com.facebook.react.bridge.WritableMap;
 import android.app.Activity;
 import android.content.ClipData;
 import android.content.Intent;
+import android.content.ContentResolver;
+import android.net.Uri;
+import android.database.Cursor;
+import android.provider.OpenableColumns;
+import android.graphics.BitmapFactory;
+import android.media.MediaMetadataRetriever;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Arrays;
+import java.io.File;
+import java.io.InputStream;
+
 
 public class PhotoPickerModule extends ReactContextBaseJavaModule {
 
@@ -36,30 +46,44 @@ public class PhotoPickerModule extends ReactContextBaseJavaModule {
         @Override
         public void onActivityResult(Activity activity, int requestCode, int resultCode, Intent intent) {
             try {
-                if (requestCode == SINGLE_PHOTO_PICKER_REQUEST_CODE || requestCode == MULTIPLE_PHOTO_PICKER_REQUEST_CODE) {
-                    if (resultCode == RESULT_OK) {
-                        WritableArray resultUris = Arguments.createArray();
-                        if (intent != null) {
-                            if (intent.getDataString() != null) {
-                                resultUris.pushString(intent.getDataString());
-                                sendMessageToJS(PhotoPickerConstants.SUCCESS, resultUris);
-                            } else {
-                                ClipData clipData = intent.getClipData();
-                                if (clipData != null) {
-                                    int count = clipData.getItemCount();
-                                    for (int i = 0; i < count; i++) {
-                                        ClipData.Item item = clipData.getItemAt(i);
-                                        String uri = item.getUri().toString();
-                                        resultUris.pushString(uri);
-                                    }
-                                    sendMessageToJS(PhotoPickerConstants.SUCCESS, resultUris);
-                                }
-                            }
-                        }
-                    } else if (resultCode == RESULT_CANCELED) {
-                        sendErrorToJS(PhotoPickerConstants.CANCELLED, PhotoPickerConstants.CANCEL_MESSAGE);
+                // Invalid request code
+                boolean invalidRequestCode = (requestCode != SINGLE_PHOTO_PICKER_REQUEST_CODE && requestCode != MULTIPLE_PHOTO_PICKER_REQUEST_CODE);
+                if (invalidRequestCode) {
+                    return;
+                }
+
+                if (resultCode == RESULT_CANCELED) {
+                    sendErrorToJS(PhotoPickerConstants.CANCELLED, PhotoPickerConstants.CANCEL_MESSAGE);
+                    return;
+                }
+
+                if (intent == null) {
+                    return;
+                }
+                
+                WritableArray resultUris = Arguments.createArray();
+                ContentResolver contentResolver = getReactApplicationContext().getContentResolver();
+
+                boolean singleMedia = (intent.getData() != null); // user was restricted to selecting one media file only
+                boolean multipleMedia = (intent.getClipData() != null); // user was able to multiselect media
+
+                if (singleMedia) {
+                    Uri uri = intent.getData();
+                    WritableMap itemMap = getAttachmentData(contentResolver, uri);
+                    resultUris.pushMap(itemMap);
+                } else if (multipleMedia) {
+                    ClipData clipData = intent.getClipData();
+                    int count = clipData.getItemCount();
+                    for (int i = 0; i < count; i++) {
+                        ClipData.Item item = clipData.getItemAt(i);
+                        Uri uri = item.getUri();
+
+                        WritableMap itemMap = getAttachmentData(contentResolver, uri);
+                        resultUris.pushMap(itemMap);
                     }
                 }
+
+                sendMessageToJS(PhotoPickerConstants.SUCCESS, resultUris);
             } catch (Exception e) {
                 sendErrorToJS(PhotoPickerConstants.ERROR, e.toString());
             }
@@ -80,7 +104,7 @@ public class PhotoPickerModule extends ReactContextBaseJavaModule {
     private void sendMessageToJS(String status, WritableArray data) {
         WritableMap params = Arguments.createMap();
         params.putString(PhotoPickerConstants.STATUS, status);
-        params.putArray(PhotoPickerConstants.URIS, data);
+        params.putArray(PhotoPickerConstants.ATTACHMENTS, data);
 
         callback.invoke(params);
         callback = null;
@@ -95,6 +119,78 @@ public class PhotoPickerModule extends ReactContextBaseJavaModule {
         callback = null;
     }
 
+    /**
+    * Returns a WritableMap object containing the attachment data of the media file selected
+    * @param uri of the file provided by the intent directly or through its clip data
+    * @param cr ContentResolver used to access information such as mime type, size, etc
+    * @return {uri, width, height, size, mime}
+    */
+    private WritableMap getAttachmentData(ContentResolver cr, Uri uri) {
+        String mimeType = getMimeType(cr, uri);
+        long fileSize = getFileSize(cr, uri);
+        int[] dimensions = {0, 0}; //[width, height]
+
+        if (mimeType.contains("image")) {
+            dimensions = getImageDimensions(cr, uri);
+        } else {
+            dimensions = getVideoDimensions(uri);
+        }
+
+        // Create a WritableMap to return it to JS as an object
+        WritableMap itemMap = Arguments.createMap();
+        itemMap.putString(PhotoPickerConstants.URI, uri.toString());
+        itemMap.putInt(PhotoPickerConstants.WIDTH, dimensions[0]);
+        itemMap.putInt(PhotoPickerConstants.HEIGHT, dimensions[1]);
+        itemMap.putDouble(PhotoPickerConstants.SIZE, (double) fileSize);
+        itemMap.putString(PhotoPickerConstants.MIME, mimeType);
+
+        return itemMap;
+    }
+
+    private String getMimeType(ContentResolver cr, Uri fileUri) {
+        String mimeType = cr.getType(fileUri);
+        return mimeType;
+    }
+
+    private long getFileSize(ContentResolver cr, Uri fileUri) {
+        // Query the content resolver for a file type
+        Cursor cursor = cr.query(fileUri, null, null, null, null);
+        if (cursor != null && cursor.moveToFirst()) {
+            int sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE);
+            long fileSize = cursor.getLong(sizeIndex);
+            cursor.close();
+            return fileSize;
+        }
+
+        return 0;
+    }
+
+    private int[] getImageDimensions(ContentResolver cr, Uri fileUri){
+        try {
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inJustDecodeBounds = true;
+            InputStream input = cr.openInputStream(fileUri);
+            BitmapFactory.decodeStream(input, null, options);  input.close();
+            return new int[]{options.outWidth, options.outHeight};
+        }
+        catch (Exception e){}
+        return new int[]{0,0};
+    }
+
+    private int[] getVideoDimensions(Uri fileUri) {
+        MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+        try {
+            retriever.setDataSource(getReactApplicationContext(), fileUri);
+            int width = Integer.valueOf(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH));
+            int height = Integer.valueOf(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT));
+            retriever.release();
+            return new int[]{width, height};
+        } catch (Exception e) {
+            return new int[]{0,0};
+        }
+    }
+
+
     @ReactMethod
     public void launchPhotoPicker(ReadableMap params, Callback cb) {
         try {
@@ -104,6 +200,7 @@ public class PhotoPickerModule extends ReactContextBaseJavaModule {
             boolean multipleMedia = false;
             String mimeType = null;
             String mediaType = null;
+            int maxItems = 0;
 
             if (params.hasKey("multipleMedia")) {
                 multipleMedia = params.getBoolean("multipleMedia");
@@ -113,6 +210,9 @@ public class PhotoPickerModule extends ReactContextBaseJavaModule {
             }
             if (params.hasKey("mediaType")) {
                 mediaType = params.getString("mediaType");
+            }
+            if (params.hasKey("maxItems")) {
+                maxItems = params.getInt("maxItems");
             }
 
             int requestCode;
@@ -143,7 +243,11 @@ public class PhotoPickerModule extends ReactContextBaseJavaModule {
 
             if (multipleMedia) {
                 requestCode = MULTIPLE_PHOTO_PICKER_REQUEST_CODE;
-                intent = new ActivityResultContracts.PickMultipleVisualMedia().createIntent(getReactApplicationContext(), request);
+                if (maxItems > 0) {
+                    intent = new ActivityResultContracts.PickMultipleVisualMedia(maxItems).createIntent(getReactApplicationContext(), request);
+                } else {
+                    intent = new ActivityResultContracts.PickMultipleVisualMedia().createIntent(getReactApplicationContext(), request);
+                }
             } else {
                 requestCode = SINGLE_PHOTO_PICKER_REQUEST_CODE;
                 intent = new ActivityResultContracts.PickVisualMedia().createIntent(getReactApplicationContext(), request);

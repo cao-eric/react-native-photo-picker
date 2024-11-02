@@ -18,5 +18,11 @@ public class PhotoPickerConstants {
     public static final String IMAGE_ONLY = "ImageOnly";
     public static final String VIDEO_ONLY = "VideoOnly";
 
-
+    // Attachment object
+    public static final String ATTACHMENTS = "attachments";
+    public static final String URI = "uri";
+    public static final String WIDTH = "width";
+    public static final String HEIGHT = "height";
+    public static final String SIZE = "size";
+    public static final String MIME = "mime";
 }
